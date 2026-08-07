@@ -7,6 +7,9 @@
 #include "power/power_manager.h"
 #include "app/app_state.h"
 #include "utils/logger.h"
+#include "utils/csv_stream.h"
+#include "test/selftest.h"
+#include "test/imu_calibration.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Module instances
@@ -47,6 +50,7 @@ void setup() {
     setState(AppState::BOOT);
 
     Logger::begin(SERIAL_BAUD);
+    CSV_BEGIN();        // no-op unless CSV_STREAM_ENABLED=1
 
     pinMode(PIN_STATUS_LED, OUTPUT);
     digitalWrite(PIN_STATUS_LED, HIGH);     // LED on = initializing
@@ -76,6 +80,27 @@ void setup() {
     // ── Sensors ───────────────────────────────────────────────────────────────
     bool sensors_ok = sensorMgr.begin();
     display.showSensorStatus(getAppStatus().health);
+
+    // ── Bench tooling ─────────────────────────────────────────────────────────
+    // Both run BEFORE startTasks() — they need deterministic, exclusive access
+    // to the I2C bus. Deliberately placed above the !sensors_ok early return:
+    // a failed sensor is exactly when you most want the diagnostics.
+    // Enable one at a time via build_flags in platformio.ini.
+#ifdef RUN_SELFTEST
+    runSelfTest(sensorMgr.imu(), sensorMgr.ppg(),
+                getAppStatus().health.imu_ok,
+                getAppStatus().health.ppg_ok);
+#endif
+
+#ifdef RUN_CALIBRATION
+    if (getAppStatus().health.imu_ok) {
+        runImuCalibration(sensorMgr.imu());
+    } else {
+        LOG_E("APP", "Cannot calibrate — IMU did not initialise.");
+    }
+    LOG_I("APP", "Calibration build: halting. Reflash without RUN_CALIBRATION.");
+    while (true) delay(1000);
+#endif
 
     if (!sensors_ok) {
         LOG_E("APP", "No sensors initialized — check I2C wiring");

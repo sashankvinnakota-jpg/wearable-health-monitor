@@ -1,6 +1,7 @@
 #include "sensor_manager.h"
 #include "../app/app_state.h"
 #include "../utils/logger.h"
+#include "../utils/csv_stream.h"
 #include "../config/pins.h"
 #include <Arduino.h>
 
@@ -48,6 +49,10 @@ void SensorManager::_doImuRead() {
     _imu_buf.push(sample);
     getAppStatus().last_accel_mag = sample.accelMagnitude();
 
+    // Full-rate telemetry. pulse_raw is read earlier in the same task cycle,
+    // so the two values in this row are from the same 10 ms window.
+    CSV_EMIT_IMU(sample, getAppStatus().pulse_raw);
+
     // TODO (Phase 2): pass sample to fall detection state machine
 }
 
@@ -58,6 +63,7 @@ void SensorManager::_doPpgRead() {
 
     for (int i = 0; i < n; i++) {
         _ppg_buf.push(batch[i]);
+        CSV_EMIT_PPG(batch[i]);
     }
 
     // Update display fields with most recent sample
@@ -92,8 +98,10 @@ void SensorManager::_imuTask(void *param) {
     TickType_t last_wake = xTaskGetTickCount();
 
     for (;;) {
-        self->_doImuRead();
+        // Pulse first, then IMU: _doImuRead() emits the CSV row containing both,
+        // so the ADC value must already be current when it runs.
         self->_doPulseSensorRead();  // share task — both at 100 Hz
+        self->_doImuRead();
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(1000 / IMU_SAMPLE_HZ));
     }
 }

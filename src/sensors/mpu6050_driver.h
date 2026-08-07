@@ -57,10 +57,15 @@
 #define MPU_ACCEL_FS_4G         0x08    // ±4  g  →  8192 LSB/g
 #define MPU_ACCEL_FS_8G         0x10    // ±8  g  →  4096 LSB/g  ← chosen (fall headroom)
 #define MPU_ACCEL_FS_16G        0x18    // ±16 g  →  2048 LSB/g
-#define MPU_REG_ACCEL_CONFIG2   0x1D    // MPU-6500/9250 only: accel DLPF
+
+// ── ACCEL_CONFIG2 (0x1D) — MPU-6500/9250 dies only ───────────────────────────
+// The genuine MPU-6050 filters accel and gyro together via CONFIG (0x1A).
+// The MPU-6500 die split them out: leaving this at its 0x00 default runs the
+// accelerometer at ~460 Hz bandwidth while the gyro sits at 44 Hz.
+// On a real MPU-6050 this register is undocumented and the write is inert.
+#define MPU_REG_ACCEL_CONFIG2   0x1D
 #define MPU_ACCEL_DLPF_44HZ     0x03
-#define MPU_REG_ACCEL_CONFIG2   0x1D    // MPU-6500/9250 only: accel DLPF
-#define MPU_ACCEL_DLPF_44HZ     0x03
+
 // Sensitivity denominators for chosen full-scale ranges
 #define MPU_ACCEL_SENS          4096.0f     // LSB/g   for ±8 g
 #define MPU_GYRO_SENS           65.5f       // LSB/°/s for ±500 °/s

@@ -1,0 +1,153 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// imu_calibration.cpp — six-position accel calibration + gyro bias
+// Place at: src/test/imu_calibration.cpp
+// ─────────────────────────────────────────────────────────────────────────────
+
+#include "imu_calibration.h"
+#include "../utils/logger.h"
+#include <Arduino.h>
+#include <math.h>
+
+namespace {
+
+// The six orientations, in the order we prompt for them.
+// Index into these arrays: 0=+X up, 1=-X up, 2=+Y up, 3=-Y up, 4=+Z up, 5=-Z up
+const char *POSITION_NAME[6] = {
+    "+X UP  (right edge up, board vertical)",
+    "-X UP  (left edge up, board vertical)",
+    "+Y UP  (front edge up, board vertical)",
+    "-Y UP  (back edge up, board vertical)",
+    "+Z UP  (flat, components facing UP)",
+    "-Z UP  (flat, components facing DOWN)",
+};
+
+void flushInput() {
+    while (Serial.available()) Serial.read();
+}
+
+void waitForEnter(const char *prompt) {
+    Serial.println();
+    Serial.printf("  >>> Position: %s\n", prompt);
+    Serial.print (F("      Place the board, let it settle, then press ENTER: "));
+    flushInput();
+    while (!Serial.available()) delay(20);
+    flushInput();
+    Serial.println(F("recording..."));
+}
+
+// Average CAL_SAMPLES_PER_POS readings. Returns false if too many reads failed.
+bool averagePosition(MPU6050Driver &imu, float out_a[3], float out_g[3]) {
+    double sa[3] = {0, 0, 0};
+    double sg[3] = {0, 0, 0};
+    int good = 0;
+
+    delay(CAL_SETTLE_MS);
+
+    for (int i = 0; i < CAL_SAMPLES_PER_POS; i++) {
+        ImuSample s;
+        if (imu.readSample(s)) {
+            sa[0] += s.ax; sa[1] += s.ay; sa[2] += s.az;
+            sg[0] += s.gx; sg[1] += s.gy; sg[2] += s.gz;
+            good++;
+        }
+        delay(10);
+        if ((i % 100) == 0) Serial.print('.');
+    }
+    Serial.println();
+
+    if (good < CAL_SAMPLES_PER_POS / 2) {
+        Serial.printf("      ERROR: only %d/%d reads succeeded\n", good, CAL_SAMPLES_PER_POS);
+        return false;
+    }
+
+    for (int k = 0; k < 3; k++) {
+        out_a[k] = (float)(sa[k] / good);
+        out_g[k] = (float)(sg[k] / good);
+    }
+    return true;
+}
+
+}  // namespace
+
+// ─────────────────────────────────────────────────────────────────────────────
+ImuCalibration runImuCalibration(MPU6050Driver &imu) {
+    ImuCalibration cal = {};
+    cal.valid = false;
+
+    float a[6][3];      // accel means per position
+    float g[6][3];      // gyro means per position
+
+    Serial.println();
+    Serial.println(F("  ==============================================================="));
+    Serial.println(F("   IMU CALIBRATION — six positions"));
+    Serial.println(F("  ==============================================================="));
+    Serial.println(F("   You will be asked to hold the board in six orientations."));
+    Serial.println(F("   Accuracy depends on how square each position is: use a table"));
+    Serial.println(F("   edge or a book corner rather than holding it by hand."));
+
+    for (int p = 0; p < 6; p++) {
+        waitForEnter(POSITION_NAME[p]);
+        if (!averagePosition(imu, a[p], g[p])) {
+            Serial.println(F("   Calibration ABORTED — check the IMU connection."));
+            return cal;
+        }
+        Serial.printf("      mean: ax=%+.4f ay=%+.4f az=%+.4f g\n",
+                      a[p][0], a[p][1], a[p][2]);
+    }
+
+    // ── Solve offset and scale per axis ───────────────────────────────────────
+    // Axis k is measured "up" in position 2k and "down" in position 2k+1.
+    for (int k = 0; k < 3; k++) {
+        float up   = a[2 * k][k];
+        float down = a[2 * k + 1][k];
+
+        cal.accel_offset[k] = (up + down) * 0.5f;
+
+        float span = up - down;             // should be ≈ +2.0 g
+        if (fabsf(span) < 1.5f) {
+            Serial.printf("   WARNING: axis %d span = %.3f g (expected ~2.0).\n", k, span);
+            Serial.println(F("            A position was probably held wrong. Re-run."));
+            cal.accel_scale[k] = 1.0f;
+        } else {
+            cal.accel_scale[k] = 2.0f / span;
+        }
+    }
+
+    // ── Gyro bias: average across all six positions ───────────────────────────
+    // The board is stationary in every position, so true rate is zero in all of
+    // them. Averaging all six cancels any orientation-dependent effect.
+    for (int k = 0; k < 3; k++) {
+        double s = 0;
+        for (int p = 0; p < 6; p++) s += g[p][k];
+        cal.gyro_bias[k] = (float)(s / 6.0);
+    }
+
+    cal.valid = true;
+
+    // ── Emit a paste-ready header ─────────────────────────────────────────────
+    Serial.println();
+    Serial.println(F("  ==============================================================="));
+    Serial.println(F("   DONE — copy this into src/config/calibration.h"));
+    Serial.println(F("  ==============================================================="));
+    Serial.println();
+    Serial.println(F("#pragma once"));
+    Serial.println(F("// Auto-generated by runImuCalibration(). Per-board — do not copy"));
+    Serial.println(F("// these values to a different physical MPU module."));
+    Serial.println();
+    Serial.printf ("#define ACCEL_OFFSET_X   %+.6ff\n", cal.accel_offset[0]);
+    Serial.printf ("#define ACCEL_OFFSET_Y   %+.6ff\n", cal.accel_offset[1]);
+    Serial.printf ("#define ACCEL_OFFSET_Z   %+.6ff\n", cal.accel_offset[2]);
+    Serial.println();
+    Serial.printf ("#define ACCEL_SCALE_X    %.6ff\n",  cal.accel_scale[0]);
+    Serial.printf ("#define ACCEL_SCALE_Y    %.6ff\n",  cal.accel_scale[1]);
+    Serial.printf ("#define ACCEL_SCALE_Z    %.6ff\n",  cal.accel_scale[2]);
+    Serial.println();
+    Serial.printf ("#define GYRO_BIAS_X      %+.4ff\n", cal.gyro_bias[0]);
+    Serial.printf ("#define GYRO_BIAS_Y      %+.4ff\n", cal.gyro_bias[1]);
+    Serial.printf ("#define GYRO_BIAS_Z      %+.4ff\n", cal.gyro_bias[2]);
+    Serial.println();
+    Serial.println(F("  ==============================================================="));
+    Serial.flush();
+
+    return cal;
+}
